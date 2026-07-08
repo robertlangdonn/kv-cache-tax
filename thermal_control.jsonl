@@ -1,0 +1,3 @@
+{"label": "cold-2k", "target": 2000, "ctx": 2073, "ttft_s": 10.381, "decode_tps_wall": 17.65, "decode_tps_mlx": 18.83, "peak_gb": 5.331}
+{"label": "heat-32k", "target": 32000, "ctx": 32025, "ttft_s": 317.6, "decode_tps_wall": 4.97, "decode_tps_mlx": 5.25, "peak_gb": 9.297}
+{"label": "hot-2k", "target": 2000, "ctx": 2073, "ttft_s": 14.994, "decode_tps_wall": 11.51, "decode_tps_mlx": 12.72, "peak_gb": 9.297}

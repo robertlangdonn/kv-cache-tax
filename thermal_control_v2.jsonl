@@ -1,0 +1,4 @@
+{"cycle": 1, "cold_2k_tps": 18.41, "hot_2k_tps": 15.58, "drop_pct": 15.4}
+{"cycle": 2, "cold_2k_tps": 16.5, "hot_2k_tps": 9.49, "drop_pct": 42.5}
+{"cycle": 3, "cold_2k_tps": 17.43, "hot_2k_tps": 10.83, "drop_pct": 37.9}
+{"cycle": "recovered", "cold_2k_tps": null, "hot_2k_tps": 18.86, "drop_pct": null}

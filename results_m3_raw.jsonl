@@ -1,0 +1,16 @@
+{"stack": "mlx-m3", "target": 32000, "context_tokens": 32025, "cold_discarded": true, "oom": false, "ttft_s": 360.945, "decode_tps": 5.84, "gen_tokens": 27, "peak_gb": 9.297, "facts_recalled": 5, "pass": "warmup"}
+{"stack": "mlx-m3", "target": 2000, "context_tokens": 2073, "cold_discarded": true, "oom": false, "ttft_s": 16.132, "decode_tps": 19.08, "gen_tokens": 27, "peak_gb": 5.331, "facts_recalled": 5, "pass": "warmup"}
+{"stack": "mlx-m3", "target": 16000, "context_tokens": 16089, "cold_discarded": true, "oom": false, "ttft_s": 167.587, "decode_tps": 7.39, "gen_tokens": 27, "peak_gb": 7.194, "facts_recalled": 5, "pass": "warmup"}
+{"stack": "mlx-m3", "target": 8000, "context_tokens": 8025, "cold_discarded": true, "oom": false, "ttft_s": 69.842, "decode_tps": 8.68, "gen_tokens": 27, "peak_gb": 6.073, "facts_recalled": 5, "pass": "warmup"}
+{"stack": "mlx-m3", "target": 8000, "context_tokens": 8025, "cold_discarded": false, "oom": false, "ttft_s": 73.501, "decode_tps": 8.14, "gen_tokens": 27, "peak_gb": 6.073, "facts_recalled": 5, "pass": "p1"}
+{"stack": "mlx-m3", "target": 16000, "context_tokens": 16089, "cold_discarded": false, "oom": false, "ttft_s": 175.552, "decode_tps": 7.05, "gen_tokens": 27, "peak_gb": 7.194, "facts_recalled": 5, "pass": "p1"}
+{"stack": "mlx-m3", "target": 32000, "context_tokens": 32025, "cold_discarded": false, "oom": false, "ttft_s": 405.639, "decode_tps": 3.65, "gen_tokens": 27, "peak_gb": 9.297, "facts_recalled": 5, "pass": "p1"}
+{"stack": "mlx-m3", "target": 2000, "context_tokens": 2073, "cold_discarded": false, "oom": false, "ttft_s": 19.167, "decode_tps": 9.77, "gen_tokens": 27, "peak_gb": 5.331, "facts_recalled": 5, "pass": "p1"}
+{"stack": "mlx-m3", "target": 32000, "context_tokens": 32025, "cold_discarded": false, "oom": false, "ttft_s": 430.268, "decode_tps": 3.14, "gen_tokens": 27, "peak_gb": 9.297, "facts_recalled": 5, "pass": "p2"}
+{"stack": "mlx-m3", "target": 2000, "context_tokens": 2073, "cold_discarded": false, "oom": false, "ttft_s": 20.266, "decode_tps": 17.62, "gen_tokens": 27, "peak_gb": 5.331, "facts_recalled": 5, "pass": "p2"}
+{"stack": "mlx-m3", "target": 16000, "context_tokens": 16089, "cold_discarded": false, "oom": false, "ttft_s": 175.622, "decode_tps": 6.31, "gen_tokens": 27, "peak_gb": 7.194, "facts_recalled": 5, "pass": "p2"}
+{"stack": "mlx-m3", "target": 8000, "context_tokens": 8025, "cold_discarded": false, "oom": false, "ttft_s": 76.956, "decode_tps": 6.62, "gen_tokens": 27, "peak_gb": 6.073, "facts_recalled": 5, "pass": "p2"}
+{"stack": "mlx-m3", "target": 16000, "context_tokens": 16089, "cold_discarded": false, "oom": false, "ttft_s": 179.735, "decode_tps": 7.05, "gen_tokens": 27, "peak_gb": 7.194, "facts_recalled": 5, "pass": "p3"}
+{"stack": "mlx-m3", "target": 2000, "context_tokens": 2073, "cold_discarded": false, "oom": false, "ttft_s": 19.914, "decode_tps": 9.81, "gen_tokens": 27, "peak_gb": 5.331, "facts_recalled": 5, "pass": "p3"}
+{"stack": "mlx-m3", "target": 32000, "context_tokens": 32025, "cold_discarded": false, "oom": false, "ttft_s": 469.058, "decode_tps": 4.08, "gen_tokens": 27, "peak_gb": 9.297, "facts_recalled": 5, "pass": "p3"}
+{"stack": "mlx-m3", "target": 8000, "context_tokens": 8025, "cold_discarded": false, "oom": false, "ttft_s": 79.484, "decode_tps": 6.58, "gen_tokens": 27, "peak_gb": 6.073, "facts_recalled": 5, "pass": "p3"}
