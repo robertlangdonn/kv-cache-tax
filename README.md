@@ -40,7 +40,8 @@ stacks offer for long context.
 - **Peak memory plateaus at the window** (~6 GB regardless of context length) instead of growing
   linearly — 3.3 GB saved at 32k (36%).
 - **Recall doesn't degrade, it collapses** — 5/5 to 0/5, the instant context crosses 4096 tokens, on
-  every single trial (7/7 above-window runs, zero exceptions). The 5 facts are planted near the front
+  every single trial (8/8 recorded above-window runs, zero exceptions — 11/11 counting the 3
+  discarded warmup runs, which also all showed 0/5). The 5 facts are planted near the front
   of the document (see caveat below); a rotating window keeps the *most recent* N tokens, so early
   content is exactly what gets evicted first — this is the expected failure mode, now measured.
 - **`keep=4` (StreamingLLM's own default sink size) provides zero protection here.** Attention sinks
@@ -50,7 +51,7 @@ stacks offer for long context.
 - **Methodology note:** n=3 (median, interleaved) at every length except 32k, which is n=2 — the
   machine hit real memory pressure (swap >90%) partway through the third 32k pass, twice, so that run
   was killed rather than risk degrading the rest of the system. Both recorded 32k trials agree with
-  each other and with all 7 above-window trials combined.
+  each other and with all 8 recorded above-window trials combined.
 
 Chart: `kv_cache_eviction_chart.png`.
 
