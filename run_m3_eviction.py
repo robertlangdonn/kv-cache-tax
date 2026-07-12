@@ -24,6 +24,16 @@ swap file) after ~14 sequential one_run() calls and had to be killed twice.
 mx.clear_cache() after each run (below) fixes the accumulation; run_m3.py
 (the v1 baseline script) doesn't need it since it never builds a fresh
 per-layer cache list 16+ times in one process the way this script does.
+
+Note (Codex-caught, post-hoc): WINDOW is the configured max_size, not the
+true effective window peak_gb measures. RotatingKVCache trims strictly to
+max_size during decode, but during prefill (multi-token chunks) it can hold
+max_size + S - 1 tokens, where S is the prefill chunk size -- and
+stream_generate defaults prefill_step_size to 2048, so the real prefill-time
+peak here is closer to 4096+2047=6143 tokens, not a strict 4096. The
+memory-plateau finding (peak_gb stops growing with context) is unaffected --
+it's still a fixed constant either way -- but don't read WINDOW as the exact
+token count behind that plateau. See README.md's "Correction" note.
 """
 
 import time, json, argparse, os, statistics

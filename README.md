@@ -52,6 +52,22 @@ stacks offer for long context.
   machine hit real memory pressure (swap >90%) partway through the third 32k pass, twice, so that run
   was killed rather than risk degrading the rest of the system. Both recorded 32k trials agree with
   each other and with all 8 recorded above-window trials combined.
+- **Correction: the effective window during prefill is larger than the configured `max_size`.**
+  MLX's `RotatingKVCache` trims strictly to `max_size` during decode (`_update_in_place`, one
+  token at a time) — but during prefill (`_update_concat`, multi-token chunks) it can transiently
+  hold up to `max_size + S - 1` tokens, where `S` is the prefill chunk size. mlx-lm's
+  `stream_generate` defaults to `prefill_step_size=2048`, so for a prompt processed in multiple
+  chunks the peak footprint during prefill can reach ~6143 tokens' worth of cache, not a strict
+  4096 — confirmed directly against `mlx_lm/models/cache.py`'s own source comment ("The largest
+  size is `self.max_size + S - 1`"). `mx.get_peak_memory()` captures the all-time high across the
+  whole run, so the peak-GB numbers above likely reflect this larger prefill-time transient, not
+  the tighter decode-time steady state. **The plateau finding itself is unaffected** — peak memory
+  is still capped by a fixed constant independent of total context length, which is the actual
+  claim — but "window=4096" overstates the precision of what's being measured; the true effective
+  window during prefill sits somewhere in the 4096–6143 range, not pinned down exactly here.
+  Caught by a Codex review before this repo's commits were pushed; not re-run with an explicit
+  smaller `prefill_step_size` to nail the exact number, which is the natural follow-up if this
+  matters for a specific claim later.
 
 Chart: `kv_cache_eviction_chart.png`.
 
