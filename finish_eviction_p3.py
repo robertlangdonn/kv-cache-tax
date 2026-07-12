@@ -11,6 +11,16 @@ ever re-run against the committed data (caught by a Codex review before
 this repo's commits were pushed: p3/8000 was already present, and the old
 hard-coded MISSING = [8000, 32000] would have appended a second copy of it,
 corrupting the n=3 aggregation to n=4 for that point).
+
+32000 is DELIBERATELY EXCLUDED from automatic recovery (also caught by
+Codex review, second pass): its n=2 result is the one published in
+README.md / the chart / both blog posts, accepted as final because both
+recorded trials agree with each other and with every other above-window
+trial. If this script auto-recovered 32000 too, a future run could
+silently turn that into n=3 and make the published artifacts stale without
+anyone updating them. To deliberately get a 3rd 32k sample, edit
+ALL_TARGETS below yourself -- and update README.md / the chart / both blog
+posts to match afterward.
 """
 
 import json, os, statistics
@@ -23,7 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = os.path.join(HERE, "results_m3_eviction_raw.jsonl")
 OUT = os.path.join(HERE, "results_m3_eviction.jsonl")
 
-ALL_TARGETS = [2000, 8000, 16000, 32000]
+ALL_TARGETS = [2000, 8000, 16000]  # 32000 excluded on purpose -- see docstring
 _existing_p3 = {
     r["target"]
     for r in (json.loads(l) for l in open(RAW))
