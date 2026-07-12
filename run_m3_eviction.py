@@ -18,6 +18,12 @@ fixed window size, as context grows past that window?
 RUN UNDER caffeinate:
   caffeinate -dimsu <venv>/bin/python run_m3_eviction.py
   (smoke test one length: add  --lengths 2000)
+
+Note: the original run of this script hit real swap pressure (>90% of an 8GB
+swap file) after ~14 sequential one_run() calls and had to be killed twice.
+mx.clear_cache() after each run (below) fixes the accumulation; run_m3.py
+(the v1 baseline script) doesn't need it since it never builds a fresh
+per-layer cache list 16+ times in one process the way this script does.
 """
 
 import time, json, argparse, os, statistics
@@ -75,6 +81,7 @@ def one_run(model, tok, target, cold):
             peak_gb=round(mx.get_peak_memory() / 1e9, 3),
             failure=f"{type(e).__name__}: {str(e)[:160]}",
         )
+    mx.clear_cache()
     return rec
 
 
