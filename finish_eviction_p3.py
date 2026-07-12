@@ -1,11 +1,16 @@
 """
-Finish the interrupted p3 pass (8000, 32000 only -- 2000 and 16000 already
-recorded) and append to the existing raw log, then aggregate.
+Finish an interrupted p3 pass and append to the existing raw log, then
+aggregate. Historical note: the original run_m3_eviction.py hit severe swap
+pressure (90% of 8GB swap used) after ~14 consecutive one_run() calls without
+releasing MLX's internal buffer cache between runs; this script (with an
+explicit mx.clear_cache() after each run) is what recovered the run.
 
-The original run_m3_eviction.py hit severe swap pressure (90% of 8GB swap
-used) after ~14 consecutive one_run() calls without releasing MLX's internal
-buffer cache between runs. This adds an explicit mx.clear_cache() after each
-run to avoid repeating that.
+MISSING is computed from the raw log, not hard-coded -- a hard-coded list
+would silently duplicate a target that's already recorded if this script is
+ever re-run against the committed data (caught by a Codex review before
+this repo's commits were pushed: p3/8000 was already present, and the old
+hard-coded MISSING = [8000, 32000] would have appended a second copy of it,
+corrupting the n=3 aggregation to n=4 for that point).
 """
 
 import json, os, statistics
@@ -18,10 +23,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = os.path.join(HERE, "results_m3_eviction_raw.jsonl")
 OUT = os.path.join(HERE, "results_m3_eviction.jsonl")
 
-MISSING = [8000, 32000]
+ALL_TARGETS = [2000, 8000, 16000, 32000]
+_existing_p3 = {
+    r["target"]
+    for r in (json.loads(l) for l in open(RAW))
+    if r["pass"] == "p3" and not r["cold_discarded"] and not r["oom"]
+}
+MISSING = [t for t in ALL_TARGETS if t not in _existing_p3]
 
-print(f"loading {MODEL} ...")
-model, tok = load(MODEL)
+if MISSING:
+    print(f"loading {MODEL} ...")
+    model, tok = load(MODEL)
+else:
+    print("Nothing missing -- all targets already have a recorded p3 pass.")
 
 for target in MISSING:
     print(f"p3 {target} ...")
