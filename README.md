@@ -119,6 +119,42 @@ overstated the long-context savings in the first cut of this analysis (caught in
 
 Chart: `kv_cache_prefix_reuse_chart.png`.
 
+## Quantized-KV leg: fp8 KV cache on the L4 — the cross-hardware answer
+
+On the M3 (MLX, `--kv-bits`), quantizing the KV cache was all cost and no benefit: peak RAM went
+UP, kv8 decoded ~4× slower, and it OOM'd at 32k where fp16 fit. The open question was whether
+that's a fact about KV quantization or about one implementation of it. Same model
+(Llama-3.1-8B AWQ-INT4), same transcript and lengths, vLLM 0.25.1 with `--kv-cache-dtype fp8`
+on the same rented L4 class, both arms in one session, median of 3 interleaved passes:
+
+| context | decode fp16 | decode fp8 | fp8 speedup | TTFT fp16 | TTFT fp8 | recall (both) |
+|---|---|---|---|---|---|---|
+| 2k | 48.1 tok/s | 48.8 | +1.6% | 0.82 s | 0.81 s | 5/5 |
+| 8k | 42.2 | 45.6 | +8.0% | 2.87 s | 2.81 s | 5/5 |
+| 16k | 36.2 | 41.9 | +15.8% | 6.20 s | 6.01 s | 5/5 |
+| 32k | 28.1 | 36.1 | **+28.4%** | 14.79 s | 14.11 s | 5/5 |
+
+- **Capacity doubles exactly.** Same 13.37 GiB KV reservation: 109,504 tokens (fp16) → 219,008
+  (fp8), max concurrency at 34k-token requests 3.22× → 6.44×. Both numbers from vLLM's own
+  startup log (`l4_kvquant_env/`).
+- **Decode gets faster, and the speedup GROWS with context** — +1.6% at 2k to +28.4% at 32k.
+  That's the bandwidth signature: batch-1 decode is bound by reading the KV cache, and fp8
+  halves the bytes read per token, which matters more the bigger the cache is. This is the
+  mirror image of the M3 result, where the quantized path *added* work instead of removing
+  bytes.
+- **The truth-table cell:** quantized KV on M3/MLX = all cost, no benefit; on L4/vLLM = 2×
+  capacity + up to 28% faster decode + recall intact, no measured cost. The M3 finding was
+  about MLX's implementation, not about KV quantization.
+- **Caveats:** vLLM's own startup log warns fp8 "may cause accuracy drop without a proper
+  scaling factor" — this run uses uncalibrated dynamic scaling, and the 5-planted-fact recall
+  probe is coarse; degradation below its sensitivity (e.g. perplexity, long reasoning chains)
+  is not ruled out. Thermal ordering is not a concern here (actively-cooled GPU; passes agree
+  to 2 decimals). Decode tok/s is token-counted via the server's own `usage` field, not
+  stream-chunk-counted (v1's caveat, fixed).
+
+Chart: `kv_cache_kvquant_chart.png`. Runbook: `L4_RUNBOOK_KVQUANT.md`. Total rental cost for
+this leg: ~₹10–25 on a Jarvislabs L4 (₹41.31/hr, ~35 min of billed compute).
+
 ## Honest caveats (read before quoting)
 
 - Two different 4-bit schemes: MLX 4-bit (M3) vs AWQ INT4 (L4). Read the two as **within-stack curves**,
