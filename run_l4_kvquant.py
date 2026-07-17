@@ -130,8 +130,12 @@ def one_run(client, target):
     return rec
 
 
-OOM_MARKERS = ("out of memory", "outofmemory", "kv cache", "no available memory",
-               "insufficient memory", "cuda error", "resource exhausted")
+# Memory-exhaustion wording ONLY -- a generic "cuda error" (invalid argument,
+# illegal memory access) or a "kv cache" config message is not OOM, and
+# counting it as such would fake the memory-capacity conclusion.
+OOM_MARKERS = ("out of memory", "outofmemory", "no available memory",
+               "insufficient memory", "resource exhausted", "cannot allocate",
+               "allocation failed")
 
 
 def classify_failure(e):
