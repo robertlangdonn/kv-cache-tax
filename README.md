@@ -160,7 +160,8 @@ this leg: ~₹10–25 on a Jarvislabs L4 (₹41.31/hr, ~35 min of billed compute
 - Two different 4-bit schemes: MLX 4-bit (M3) vs AWQ INT4 (L4). Read the two as **within-stack curves**,
   not a controlled hardware A/B.
 - **Early-needle recall:** the 5 facts are placed near the front, not scattered through the document.
-- **L4 decode is stream-chunk-counted** (vLLM streams ~1 token/chunk); exact token-count is a v2 fix.
+- **The v1 L4 leg's decode is stream-chunk-counted** (vLLM streams ~1 token/chunk). The
+  quantized-KV leg fixed this: its decode rates are token-counted via the server's `usage` field.
 - n as noted; M3 medians of 3 interleaved passes, warmed.
 
 ## Reproduce
