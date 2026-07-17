@@ -221,7 +221,13 @@ def main():
         random.Random(seed).shuffle(x)
         return x
 
-    passes = [("warmup", shuffled(1)), ("p1", shuffled(2)), ("p2", shuffled(3)), ("p3", shuffled(4))]
+    # 4 recorded passes (even count, Codex P1): condition order alternates at
+    # the PASS level -- cold-first in p1/p3, warm-first in p2/p4 -- so every
+    # target is cold-first in exactly 2 of 4 recorded cells. The earlier
+    # (pass+position)%2 parity scheme did NOT guarantee this per target once
+    # lengths are shuffled (a length could land warm-first 2-of-3).
+    passes = [("warmup", shuffled(1)), ("p1", shuffled(2)), ("p2", shuffled(3)),
+              ("p3", shuffled(4)), ("p4", shuffled(5))]
 
     prefix_ids = shared_prefix_ids(tok, L)
     print(f"shared prefix: {len(prefix_ids)} tokens (token-exact across all targets)")
@@ -236,14 +242,15 @@ def main():
         warm_prefix_cache(model, tok, lru, prefix_ids)
         print(f"\n### pass {pname}  order={order}{'  (DISCARDED)' if cold_warmup else ''}")
         for li, target in enumerate(order):
-            # Alternate which condition runs FIRST per grid cell. A fixed
+            # Alternate which condition runs FIRST, at the pass level. A fixed
             # cold-then-warm order hands warm a systematic thermal penalty on
             # this fanless machine (the aborted first sweep measured it: warm
             # 471s vs cold 373s at 32k in the same pass -- the chip was
-            # heat-soaked by cold's own 6-min prefill). Alternating means each
-            # condition takes the hot second slot equally across the aggregate.
+            # heat-soaked by cold's own 6-min prefill). Pass-level alternation
+            # over an even number of recorded passes makes each condition take
+            # the hot second slot exactly half the time FOR EVERY TARGET.
             conds = [("cold", run_cold), ("warm", run_warm)]
-            if (pi + li) % 2:
+            if pi % 2 == 0 and not cold_warmup:
                 conds.reverse()
             for ci, (cond, fn) in enumerate(conds):
                 t_start = round(time.perf_counter() - t_process_start, 1)
@@ -267,21 +274,28 @@ def main():
         mx.clear_cache()
 
     raw = [json.loads(l) for l in open(RAW)]
-    rec_only = [r for r in raw if not r["cold_discarded"] and not r["oom"]]
+    recorded = [r for r in raw if not r["cold_discarded"]]
+    n_expected = len(passes) - 1  # recorded passes
     agg = []
     for target in L:
         row = {"target": target}
         for cond in ("cold", "warm"):
-            s = [r for r in rec_only if r["target"] == target and r["stack"].endswith(cond)]
+            all_s = [r for r in recorded if r["target"] == target and r["stack"].endswith(cond)]
+            s = [r for r in all_s if not r["oom"]]
+            n_failed = len(all_s) - len(s)
             if not s:
-                oomed = [r for r in raw if r["target"] == target and r["stack"].endswith(cond) and r["oom"]]
-                row[cond] = {"oom": True, "peak_gb": oomed[0]["peak_gb"] if oomed else None}
+                row[cond] = {"oom": True, "n_ok": 0, "n_expected": n_expected,
+                             "peak_gb": all_s[0]["peak_gb"] if all_s else None}
                 continue
             def ms(k):
                 v = [r[k] for r in s]
                 return {"median": round(statistics.median(v), 3), "min": min(v), "max": max(v)}
+            # Codex P2: a partially-failed condition must say so, not present
+            # a clean median as if every recorded pass had completed.
             row[cond] = {
-                "oom": False, "n": len(s), "context_tokens": s[0]["context_tokens"],
+                "oom": False, "n_ok": len(s), "n_expected": n_expected,
+                "n_failed": n_failed, "incomplete": n_failed > 0,
+                "context_tokens": s[0]["context_tokens"],
                 "ttft_s": ms("ttft_s"), "decode_tps": ms("decode_tps"), "peak_gb": ms("peak_gb"),
                 "recall": f"{s[0]['facts_recalled']}/5",
             }
@@ -292,16 +306,20 @@ def main():
         for a in agg:
             f.write(json.dumps(a) + "\n")
 
-    print(f"\n=== AGGREGATED (median [min,max], n={len(passes)-1} recorded passes) ===")
-    print(f"{'ctx':>7} | {'TTFT cold':>10} | {'TTFT warm':>10} | {'saved':>8} | {'saved%':>7} | recall(c/w)")
+    print(f"\n=== AGGREGATED (median [min,max], {n_expected} recorded passes) ===")
+    print(f"{'ctx':>7} | {'TTFT cold':>10} | {'TTFT warm':>10} | {'saved':>8} | {'saved%':>7} | {'n c/w':>7} | recall(c/w)")
     for a in agg:
         c, w = a["cold"], a["warm"]
         if c.get("oom") or w.get("oom"):
-            print(f"{a['target']:>7} | OOM/failed"); continue
+            print(f"{a['target']:>7} | ALL RUNS FAILED "
+                  f"(cold {c.get('n_ok', 0)}/{n_expected}, warm {w.get('n_ok', 0)}/{n_expected})")
+            continue
         saved = c["ttft_s"]["median"] - w["ttft_s"]["median"]
         pct = 100 * saved / c["ttft_s"]["median"]
+        ns = f"{c['n_ok']}/{w['n_ok']}"
+        flag = "  ⚠ INCOMPLETE" if (c["incomplete"] or w["incomplete"]) else ""
         print(f"{a['target']:>7} | {c['ttft_s']['median']:>10} | {w['ttft_s']['median']:>10} | "
-              f"{saved:>7.2f}s | {pct:>6.1f}% | {c['recall']}/{w['recall']}")
+              f"{saved:>7.2f}s | {pct:>6.1f}% | {ns:>7} | {c['recall']}/{w['recall']}{flag}")
     print(f"\nraw -> {RAW}\nclean -> {OUT}")
 
 
