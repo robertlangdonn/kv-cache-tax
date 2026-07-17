@@ -1,0 +1,309 @@
+"""
+KV cache tax -- prefix-reuse leg (shared system-prompt / tool-def prefix, cached
+once, reused across "requests" -- the agent case named in the Lab spec's 4th
+column). Same model, same 2k/8k/16k/32k total-context sweep, same thermal
+discipline as run_m3.py / run_m3_eviction.py.
+
+Structure per prompt: [FIXED SHARED PREFIX, ~500 tok] + [UNIQUE SUFFIX, grows
+to reach target total length, facts embedded inside it]. Two conditions,
+measured within the SAME harness so cold and warm are apples-to-apples (not
+reusing v1 baseline data -- v1's fact placement is structurally different,
+would be a confound):
+
+  cold: fresh KVCache every call, full prefix+suffix prefilled from scratch
+        (models: no caching, or a cold cache miss).
+  warm: the shared prefix is prefilled ONCE per length (not timed -- models an
+        agent whose system prompt/tool defs were already cached from turn 1),
+        saved via mlx_lm's own LRUPromptCache.insert_cache(). Each "request"
+        then calls fetch_nearest_cache() -- the real production prefix-cache
+        lookup mlx-lm's server uses -- which returns a deep-copied prefix
+        cache + only the new suffix tokens to prefill. TTFT measured on that
+        remainder-only call.
+
+Question this answers: prefix reuse buys back a roughly FIXED amount of
+prefill time (the prefix's own prefill cost) -- so what does that fixed
+saving look like as a fraction of TTFT as context grows? (Expected shape:
+big relative win at 2k, shrinking relative win at 32k -- opposite direction
+from the eviction leg's memory plateau, same "fixed absolute effect" family.)
+Also sanity-checks that fetch_nearest_cache's deepcopy+trim path doesn't
+silently break recall (no eviction is happening here, so recall should stay
+5/5 in both conditions -- if it doesn't, that's a real bug worth its own PR).
+
+Thermal note (learned from an aborted first sweep, raw preserved in
+results_m3_prefix_reuse_raw_ABORTED_cold-first-confound.jsonl): running
+cold-then-warm in a fixed order hands warm a systematic penalty -- at 32k the
+chip is heat-soaked by cold's own ~6-min prefill and warm measured SLOWER
+(471s vs 373s) despite doing strictly less work. Condition order therefore
+alternates per grid cell, and each record carries ran_first_in_cell +
+t_start_s so the ordering/thermal effect stays analyzable post-hoc.
+
+RUN UNDER caffeinate so the machine doesn't nap mid-32k prefill:
+  caffeinate -dimsu ~/Work/ondevice-bench/.venv/bin/python run_m3_prefix_reuse.py
+  (smoke test one length: add --lengths 2000)
+"""
+
+import time, json, argparse, os, statistics
+import mlx.core as mx
+from mlx_lm import load, stream_generate
+from mlx_lm.models.cache import (
+    LRUPromptCache,
+    make_prompt_cache,
+    can_trim_prompt_cache,
+    trim_prompt_cache,
+)
+
+from run_m3 import MODEL, FACTS, QUESTION, FILLER
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+RAW = os.path.join(HERE, "results_m3_prefix_reuse_raw.jsonl")
+OUT = os.path.join(HERE, "results_m3_prefix_reuse.jsonl")
+
+PREFIX_TARGET = 500  # tokens -- matches the inference-audit post's RAG-shaped shared prefix
+PREFIX_TEXT = (
+    "SYSTEM: You are a facilities records assistant. You will be given an "
+    "internal report followed by a question. Answer only using information "
+    "explicitly present in the report. Do not speculate. The following tool "
+    "definitions are available but not required for this task: "
+    "get_vault_status(name), list_recent_incidents(building), "
+    "escalate_to_security(vault, reason). Do not call a tool unless asked to. "
+)
+
+_PROMPT_IDS = {}
+_SHARED_PREFIX = {}
+
+
+def build_full_prompt(tok, target):
+    """Fixed prefix text + growing suffix (facts embedded in the suffix only),
+    tokenized as ONE chat turn so cold/warm see byte-identical prompt text --
+    only the caching strategy differs between conditions."""
+    if target in _PROMPT_IDS:
+        return _PROMPT_IDS[target]
+    parts, fi, block = [], 0, 0
+    while True:
+        parts.append(FILLER)
+        if fi < len(FACTS) and block > 0 and block % 3 == 0:
+            name, code = FACTS[fi]
+            parts.append(f"IMPORTANT: The access code for the {name} vault is {code}. ")
+            fi += 1
+        block += 1
+        body = PREFIX_TEXT + "".join(parts) + "\n\n" + QUESTION
+        msg = [{"role": "user", "content": body}]
+        ids = tok.apply_chat_template(msg, add_generation_prompt=True)
+        if (len(ids) >= target and fi >= len(FACTS)) or block > 4000:
+            _PROMPT_IDS[target] = ids
+            return ids
+
+
+def shared_prefix_ids(tok, all_targets):
+    """The cacheable shared prefix, as TOKENS OF THE FULL TEMPLATED PROMPT.
+
+    Encoding PREFIX_TEXT standalone does NOT yield a token-prefix of the full
+    prompt -- apply_chat_template prepends header tokens and tokenization at
+    the text boundary differs -- so the trie lookup would never match and
+    "warm" would silently run cold. Instead: tokenize every target's full
+    prompt, take their common token prefix (chat header + PREFIX_TEXT + the
+    shared start of the filler, identical across lengths by construction),
+    and cap it at PREFIX_TARGET tokens. Verified at runtime, not assumed.
+    """
+    key = tuple(all_targets)
+    if key in _SHARED_PREFIX:
+        return _SHARED_PREFIX[key]
+    id_lists = [build_full_prompt(tok, t) for t in all_targets]
+    n = min(len(x) for x in id_lists)
+    common = 0
+    while common < n and all(x[common] == id_lists[0][common] for x in id_lists):
+        common += 1
+    if common <= PREFIX_TARGET:
+        raise RuntimeError(
+            f"shared token prefix across targets is only {common} tokens "
+            f"(< {PREFIX_TARGET}); prompt construction violated the "
+            f"identical-shared-start assumption"
+        )
+    prefix = id_lists[0][:PREFIX_TARGET]
+    _SHARED_PREFIX[key] = prefix
+    return prefix
+
+
+def run_cold(model, tok, target):
+    mx.reset_peak_memory()
+    ids = build_full_prompt(tok, target)
+    rec = {"stack": "mlx-m3-prefix-cold", "target": target, "context_tokens": len(ids), "oom": False}
+    try:
+        t0 = time.perf_counter()
+        ttft = None
+        text = ""
+        last = None
+        for r in stream_generate(model, tok, ids, max_tokens=64):
+            if ttft is None:
+                ttft = time.perf_counter() - t0
+            text += r.text
+            last = r
+        rec.update(
+            ttft_s=round(ttft, 3),
+            decode_tps=round(last.generation_tps, 2),
+            gen_tokens=last.generation_tokens,
+            peak_gb=round(mx.get_peak_memory() / 1e9, 3),
+            facts_recalled=sum(1 for _, c in FACTS if c in text),
+        )
+    except Exception as e:
+        rec.update(oom=True, peak_gb=round(mx.get_peak_memory() / 1e9, 3),
+                    failure=f"{type(e).__name__}: {str(e)[:160]}")
+    return rec
+
+
+def run_warm(model, tok, target, lru):
+    mx.reset_peak_memory()
+    ids = build_full_prompt(tok, target)
+    rec = {"stack": "mlx-m3-prefix-warm", "target": target, "context_tokens": len(ids), "oom": False}
+    try:
+        # LRUPromptCache keys on a HASHABLE model key, not the nn.Module itself
+        # (mlx_lm/server.py passes model_provider.model_key; passing the module
+        # raises "unhashable type: 'Model'" since mlx nn.Module subclasses dict).
+        cache, remainder = lru.fetch_nearest_cache(MODEL, ids)
+        rec["cache_hit"] = cache is not None
+        rec["prefix_reused_tokens"] = len(ids) - len(remainder)
+        if cache is None:
+            cache = make_prompt_cache(model)
+            remainder = ids
+        t0 = time.perf_counter()
+        ttft = None
+        text = ""
+        last = None
+        for r in stream_generate(model, tok, remainder, max_tokens=64, prompt_cache=cache):
+            if ttft is None:
+                ttft = time.perf_counter() - t0
+            text += r.text
+            last = r
+        rec.update(
+            ttft_s=round(ttft, 3),
+            decode_tps=round(last.generation_tps, 2),
+            gen_tokens=last.generation_tokens,
+            peak_gb=round(mx.get_peak_memory() / 1e9, 3),
+            facts_recalled=sum(1 for _, c in FACTS if c in text),
+        )
+    except Exception as e:
+        rec.update(oom=True, peak_gb=round(mx.get_peak_memory() / 1e9, 3),
+                    failure=f"{type(e).__name__}: {str(e)[:160]}")
+    return rec
+
+
+def warm_prefix_cache(model, tok, lru, prefix_ids):
+    """Prefill the shared prefix once and insert it -- NOT timed (this models
+    an agent whose system prompt was cached on turn 1, before the measured
+    request loop starts).
+
+    Pure forward pass, NOT stream_generate(max_tokens=1): generating even one
+    token leaves that sampled token in the cache, so the cache would be one
+    position longer than the token list it's registered under in the trie --
+    every warm fetch would then resume prefill at a misaligned offset.
+    """
+    cache = make_prompt_cache(model)
+    logits = model(mx.array(prefix_ids)[None], cache=cache)
+    mx.eval(logits)
+    assert cache[0].offset == len(prefix_ids), (
+        f"prefix cache offset {cache[0].offset} != {len(prefix_ids)}"
+    )
+    lru.insert_cache(MODEL, prefix_ids, cache, cache_type="system")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--lengths", type=int, nargs="+", default=[2000, 8000, 16000, 32000])
+    args = ap.parse_args()
+    L = args.lengths
+
+    print(f"loading {MODEL} ...")
+    model, tok = load(MODEL)
+
+    import random
+    def shuffled(seed):
+        x = L[:]
+        random.Random(seed).shuffle(x)
+        return x
+
+    passes = [("warmup", shuffled(1)), ("p1", shuffled(2)), ("p2", shuffled(3)), ("p3", shuffled(4))]
+
+    prefix_ids = shared_prefix_ids(tok, L)
+    print(f"shared prefix: {len(prefix_ids)} tokens (token-exact across all targets)")
+
+    open(RAW, "w").close()
+    t_process_start = time.perf_counter()
+    for pi, (pname, order) in enumerate(passes):
+        cold_warmup = pname == "warmup"
+        # fresh LRU each pass so warm's "prefix already cached" story is clean
+        # (mirrors an agent session boundary, not cross-pass contamination)
+        lru = LRUPromptCache(max_size=8)
+        warm_prefix_cache(model, tok, lru, prefix_ids)
+        print(f"\n### pass {pname}  order={order}{'  (DISCARDED)' if cold_warmup else ''}")
+        for li, target in enumerate(order):
+            # Alternate which condition runs FIRST per grid cell. A fixed
+            # cold-then-warm order hands warm a systematic thermal penalty on
+            # this fanless machine (the aborted first sweep measured it: warm
+            # 471s vs cold 373s at 32k in the same pass -- the chip was
+            # heat-soaked by cold's own 6-min prefill). Alternating means each
+            # condition takes the hot second slot equally across the aggregate.
+            conds = [("cold", run_cold), ("warm", run_warm)]
+            if (pi + li) % 2:
+                conds.reverse()
+            for ci, (cond, fn) in enumerate(conds):
+                t_start = round(time.perf_counter() - t_process_start, 1)
+                if cond == "cold":
+                    rec = fn(model, tok, target)
+                else:
+                    rec = fn(model, tok, target, lru)
+                rec["pass"] = pname
+                rec["cold_discarded"] = cold_warmup
+                rec["ran_first_in_cell"] = ci == 0
+                rec["t_start_s"] = t_start
+                with open(RAW, "a") as f:
+                    f.write(json.dumps(rec) + "\n")
+                if rec["oom"]:
+                    print(f"  {target} [{cond}]: OOM at {rec['context_tokens']} tok, peak {rec['peak_gb']}GB")
+                else:
+                    extra = f" | reused {rec['prefix_reused_tokens']}tok" if cond == "warm" else ""
+                    print(f"  {target} [{cond}]: ctx {rec['context_tokens']} | TTFT {rec['ttft_s']}s | "
+                          f"{rec['decode_tps']} tok/s | peak {rec['peak_gb']}GB | recall {rec['facts_recalled']}/5"
+                          f"{extra}" + ("  [warmup, discarded]" if cold_warmup else ""))
+        mx.clear_cache()
+
+    raw = [json.loads(l) for l in open(RAW)]
+    rec_only = [r for r in raw if not r["cold_discarded"] and not r["oom"]]
+    agg = []
+    for target in L:
+        row = {"target": target}
+        for cond in ("cold", "warm"):
+            s = [r for r in rec_only if r["target"] == target and r["stack"].endswith(cond)]
+            if not s:
+                oomed = [r for r in raw if r["target"] == target and r["stack"].endswith(cond) and r["oom"]]
+                row[cond] = {"oom": True, "peak_gb": oomed[0]["peak_gb"] if oomed else None}
+                continue
+            def ms(k):
+                v = [r[k] for r in s]
+                return {"median": round(statistics.median(v), 3), "min": min(v), "max": max(v)}
+            row[cond] = {
+                "oom": False, "n": len(s), "context_tokens": s[0]["context_tokens"],
+                "ttft_s": ms("ttft_s"), "decode_tps": ms("decode_tps"), "peak_gb": ms("peak_gb"),
+                "recall": f"{s[0]['facts_recalled']}/5",
+            }
+            if cond == "warm":
+                row[cond]["prefix_reused_tokens"] = s[0]["prefix_reused_tokens"]
+        agg.append(row)
+    with open(OUT, "w") as f:
+        for a in agg:
+            f.write(json.dumps(a) + "\n")
+
+    print(f"\n=== AGGREGATED (median [min,max], n={len(passes)-1} recorded passes) ===")
+    print(f"{'ctx':>7} | {'TTFT cold':>10} | {'TTFT warm':>10} | {'saved':>8} | {'saved%':>7} | recall(c/w)")
+    for a in agg:
+        c, w = a["cold"], a["warm"]
+        if c.get("oom") or w.get("oom"):
+            print(f"{a['target']:>7} | OOM/failed"); continue
+        saved = c["ttft_s"]["median"] - w["ttft_s"]["median"]
+        pct = 100 * saved / c["ttft_s"]["median"]
+        print(f"{a['target']:>7} | {c['ttft_s']['median']:>10} | {w['ttft_s']['median']:>10} | "
+              f"{saved:>7.2f}s | {pct:>6.1f}% | {c['recall']}/{w['recall']}")
+    print(f"\nraw -> {RAW}\nclean -> {OUT}")
+
+
+if __name__ == "__main__":
+    main()
