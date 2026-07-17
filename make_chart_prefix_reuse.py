@@ -48,7 +48,10 @@ cold_lo = [r["cold"]["ttft_s"]["min"] for r in clean]
 cold_hi = [r["cold"]["ttft_s"]["max"] for r in clean]
 warm_lo = [r["warm"]["ttft_s"]["min"] for r in clean]
 warm_hi = [r["warm"]["ttft_s"]["max"] for r in clean]
-saved_pct = [100 * (c - w) / c for c, w in zip(cold_med, warm_med)]
+# Paired estimator: median of per-pass (cold - warm) / cold, computed by the
+# harness -- NOT difference of marginal medians, which mixes passes and
+# overstated the 16k/32k savings in the first cut (Codex round 2, P2).
+saved_pct = [r["paired"]["saved_pct"]["median"] for r in clean]
 prefix_tok = clean[0]["warm"]["prefix_reused_tokens"]
 n_passes = clean[0]["cold"]["n_expected"]
 
@@ -95,11 +98,17 @@ for r in clean:
     axB.scatter([r["cold"]["context_tokens"] / 1000] * len(pair_pct), pair_pct,
                 s=22, color=MUTED, alpha=0.6, zorder=2,
                 label="per-pass paired saving" if r is clean[0] else None)
-axB.plot(ctx, saved_pct, "-o", color=INK, lw=2.5, ms=6, zorder=3, label="median saving")
+axB.plot(ctx, saved_pct, "-o", color=INK, lw=2.5, ms=6, zorder=3, label="paired median saving")
 prop = [100 * prefix_tok / (r["cold"]["context_tokens"]) for r in clean]
 axB.plot(ctx, prop, ":", color=GREY, lw=2,
-         label="prefix share of prompt (proportional bound)")
+         label="prefix share of prompt (physical bound)")
 axB.axhline(0, color=MUTED, lw=0.8)
+if saved_pct[-1] > prop[-1]:
+    axB.annotate(
+        "median above the physical bound:\nthermal noise, not prefix reuse",
+        (ctx[-1], saved_pct[-1]), textcoords="offset points", xytext=(-8, 14),
+        ha="right", fontproperties=mono, fontsize=8.5, color=MUTED,
+    )
 axB.set_title("TTFT saved by prefix reuse (%)", fontproperties=serif, fontsize=17, color=INK, pad=10)
 axB.set_xlabel("context length (thousands of tokens)", fontproperties=mono, fontsize=11, color=MUTED)
 axB.set_ylabel("% of cold TTFT", fontproperties=mono, fontsize=11, color=MUTED)

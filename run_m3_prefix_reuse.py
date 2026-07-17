@@ -58,6 +58,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = os.path.join(HERE, "results_m3_prefix_reuse_raw.jsonl")
 OUT = os.path.join(HERE, "results_m3_prefix_reuse.jsonl")
 
+# Stamped on every record so --resume can detect a pair whose halves ran in
+# different process lifetimes (both halves EXIST, so pair-completeness alone
+# can't catch it -- learned when the first resume kept exactly such a pair).
+PROC_ID = f"{int(time.time())}-{os.getpid()}"
+
 PREFIX_TARGET = 500  # tokens -- matches the inference-audit post's RAG-shaped shared prefix
 PREFIX_TEXT = (
     "SYSTEM: You are a facilities records assistant. You will be given an "
@@ -238,10 +243,43 @@ def main():
 
     done = set()
     if args.resume and os.path.exists(RAW):
-        for l in open(RAW):
-            r = json.loads(l)
-            done.add((r["pass"], r["target"], r["stack"].split("-")[-1]))
-        print(f"--resume: {len(done)} cells already recorded, skipping those")
+        # Pair-level resume (Codex round 2, P1): a (pass, target) cell only
+        # counts as done if BOTH conditions were recorded -- in the same
+        # process, which is guaranteed by requiring the pair, since an abort
+        # between the two halves leaves an orphan. An orphaned half is
+        # DISCARDED and the whole pair reruns: keeping it would pair a
+        # measurement from one process lifetime with one from another, and
+        # both would have "run first" thermally, breaking the paired design.
+        existing = [json.loads(l) for l in open(RAW)]
+        seen = {}
+        for r in existing:
+            key = (r["pass"], r["target"])
+            seen.setdefault(key, {})[r["stack"].split("-")[-1]] = r.get("proc_id")
+        # A pair is valid only if both halves exist AND share a proc_id --
+        # a pair split across two process lifetimes has both halves present
+        # but neither is thermally second, so it must rerun. (Records from
+        # before proc_id stamping compare as None == None, i.e. same-process;
+        # any known-split legacy pair has to be deleted from the raw file by
+        # hand, which is how the p2/32k split pair was handled.)
+        complete = {k for k, conds in seen.items()
+                    if set(conds) == {"cold", "warm"} and conds["cold"] == conds["warm"]}
+        kept = [r for r in existing if (r["pass"], r["target"]) in complete]
+        dropped = len(existing) - len(kept)
+        with open(RAW, "w") as f:
+            for r in kept:
+                f.write(json.dumps(r) + "\n")
+        for pname_, target_ in complete:
+            done.add((pname_, target_, "cold"))
+            done.add((pname_, target_, "warm"))
+        print(f"--resume: {len(complete)} complete pairs kept, "
+              f"{dropped} orphaned half-pair record(s) discarded for rerun", flush=True)
+        if done and len(done) < len(passes) * len(L) * 2:
+            # Fresh process, but the recorded warmup pass belongs to a previous
+            # lifetime -- without this, the first rerun would carry the Metal
+            # JIT-compile artifact the warmup pass exists to absorb.
+            print("--resume: one discarded JIT-warmup run before rerunning pairs", flush=True)
+            run_cold(model, tok, min(L))
+            mx.clear_cache()
     else:
         open(RAW, "w").close()
     t_process_start = time.perf_counter()
@@ -276,6 +314,7 @@ def main():
                 rec["cold_discarded"] = cold_warmup
                 rec["ran_first_in_cell"] = ci == 0
                 rec["t_start_s"] = t_start
+                rec["proc_id"] = PROC_ID
                 with open(RAW, "a") as f:
                     f.write(json.dumps(rec) + "\n")
                 if rec["oom"]:
@@ -321,25 +360,52 @@ def main():
             }
             if cond == "warm":
                 row[cond]["prefix_reused_tokens"] = s[0]["prefix_reused_tokens"]
+        # Paired estimator (Codex round 2, P2): with paired cold/warm
+        # observations, difference-of-marginal-medians is the wrong statistic
+        # -- it mixes values from different passes and overstated the 16k/32k
+        # savings in the first cut of this analysis. Compute each pass's
+        # cold-minus-warm first, then summarize THOSE.
+        by_pass = {}
+        for r in [x for x in recorded if x["target"] == target and not x["oom"]]:
+            by_pass.setdefault(r["pass"], {})[r["stack"].split("-")[-1]] = r["ttft_s"]
+        pairs = [(p, v["cold"] - v["warm"], 100 * (v["cold"] - v["warm"]) / v["cold"])
+                 for p, v in sorted(by_pass.items()) if {"cold", "warm"} <= set(v)]
+        if pairs:
+            row["paired"] = {
+                "n_pairs": len(pairs),
+                "saved_s": {"median": round(statistics.median(d for _, d, _ in pairs), 3),
+                            "min": round(min(d for _, d, _ in pairs), 3),
+                            "max": round(max(d for _, d, _ in pairs), 3)},
+                "saved_pct": {"median": round(statistics.median(p for _, _, p in pairs), 2),
+                              "min": round(min(p for _, _, p in pairs), 2),
+                              "max": round(max(p for _, _, p in pairs), 2)},
+            }
         agg.append(row)
     with open(OUT, "w") as f:
         for a in agg:
             f.write(json.dumps(a) + "\n")
 
-    print(f"\n=== AGGREGATED (median [min,max], {n_expected} recorded passes) ===")
-    print(f"{'ctx':>7} | {'TTFT cold':>10} | {'TTFT warm':>10} | {'saved':>8} | {'saved%':>7} | {'n c/w':>7} | recall(c/w)")
+    print(f"\n=== AGGREGATED ({n_expected} recorded passes; saved = paired per-pass median [min,max]) ===")
+    print(f"{'ctx':>7} | {'TTFT cold':>10} | {'TTFT warm':>10} | {'paired saved':>22} | {'saved%':>18} | {'n c/w':>7} | recall(c/w)")
     for a in agg:
         c, w = a["cold"], a["warm"]
         if c.get("oom") or w.get("oom"):
             print(f"{a['target']:>7} | ALL RUNS FAILED "
                   f"(cold {c.get('n_ok', 0)}/{n_expected}, warm {w.get('n_ok', 0)}/{n_expected})")
             continue
-        saved = c["ttft_s"]["median"] - w["ttft_s"]["median"]
-        pct = 100 * saved / c["ttft_s"]["median"]
+        pr = a.get("paired")
         ns = f"{c['n_ok']}/{w['n_ok']}"
         flag = "  ⚠ INCOMPLETE" if (c["incomplete"] or w["incomplete"]) else ""
+        if pr:
+            d, p = pr["saved_s"], pr["saved_pct"]
+            saved_str = f"{d['median']:.2f}s [{d['min']:.1f},{d['max']:.1f}]"
+            pct_str = f"{p['median']:.1f}% [{p['min']:.1f},{p['max']:.1f}]"
+            if pr["n_pairs"] < n_expected:
+                flag += f"  ⚠ only {pr['n_pairs']} pairs"
+        else:
+            saved_str, pct_str = "no pairs", "-"
         print(f"{a['target']:>7} | {c['ttft_s']['median']:>10} | {w['ttft_s']['median']:>10} | "
-              f"{saved:>7.2f}s | {pct:>6.1f}% | {ns:>7} | {c['recall']}/{w['recall']}{flag}")
+              f"{saved_str:>22} | {pct_str:>18} | {ns:>7} | {c['recall']}/{w['recall']}{flag}")
     print(f"\nraw -> {RAW}\nclean -> {OUT}")
 
 

@@ -80,24 +80,28 @@ byte-identical prompt. Condition order alternated per pass (cold-first in 2 of 4
 for every length), because a fixed cold-then-warm order measurably hands the second run a thermal
 penalty on this fanless machine.
 
-| context | TTFT cold | TTFT warm | saved | saved% | prefix share of prompt |
+Saved = **median of per-pass paired (cold − warm) differences** — with paired observations,
+subtracting one condition's median from the other's mixes values from different passes and
+overstated the long-context savings in the first cut of this analysis (caught in review).
+
+| context | TTFT cold | TTFT warm | paired saved [min,max] | saved% | prefix share of prompt |
 |---|---|---|---|---|---|
-| 2k | 21.1 s | 16.1 s | 5.0 s | **23.5%** | 24.3% |
-| 8k | 89.9 s | 84.7 s | 5.2 s | **5.7%** | 6.2% |
-| 16k | 216.4 s | 213.9 s | 2.5 s | 1.2% | 3.1% |
-| 32k | 576.7 s | 543.1 s | 33.6 s | 5.8%\* | 1.6% |
+| 2k | 21.1 s | 16.1 s | 5.1 s [3.3, 6.2] | **24.2%** | 24.3% |
+| 8k | 89.9 s | 84.7 s | 5.2 s [3.1, 7.6] | **5.8%** | 6.2% |
+| 16k | 216.4 s | 213.9 s | 0.3 s [−2.8, 7.8] | 0.2% | 3.1% |
+| 32k | 539.8 s | 508.0 s | 38.7 s [0.3, 53.7] | 6.6%\* | 1.6% |
 
 - **The saving tracks the prefix's share of the prompt, then drowns in noise.** At 2k the cached
-  500 tokens are ~24% of the prompt and buy back ~24% of TTFT. By 16k they're 3% of the prompt
-  and the measured 1.2% is within run-to-run variance. A fixed-size cached prefix is a
-  short-context optimization: its absolute saving is roughly constant, so context growth dilutes
-  it — the mirror image of the eviction leg's memory plateau.
-- **\*The 32k "5.8%" is thermal noise, not signal.** The per-pass paired savings at 32k were
-  +25.9s, +15.6s, +51.6s, and +0.3s — a 51-second spread around a ~9s predicted effect, and one
-  cold pass ran 86–111s faster than the other three. Past ~16k on this fanless machine the
-  prefix-reuse effect is smaller than thermal variance and cannot be resolved; the honest claim
-  is an upper bound (the prefix's share of the prompt), not the median. Same conclusion family
-  as the v1 thermal finding.
+  500 tokens are ~24% of the prompt and buy back ~24% of TTFT. By 16k the paired saving is
+  0.3 s with a range spanning negative — indistinguishable from zero. A fixed-size cached
+  prefix is a short-context optimization: its absolute saving is roughly constant, so context
+  growth dilutes it — the mirror image of the eviction leg's memory plateau.
+- **\*The 32k "6.6%" refutes itself.** Skipping 500 of 32,007 tokens can save at most ~1.6% of a
+  prefill whose cost is superlinear in position — yet the measured median is 6.6%, with per-pass
+  paired savings scattered from +0.3s to +53.7s. A median above the physical bound is the tell:
+  past ~16k on this fanless machine, run-to-run thermal variance (same-config cold TTFTs spanned
+  489–600s across passes) is larger than the effect being measured, and the honest claim is the
+  bound, not the median. Same conclusion family as the v1 thermal finding.
 - **Recall is untouched: 5/5 at every length in both conditions** — `fetch_nearest_cache`'s
   deepcopy+resume path doesn't corrupt anything it reuses.
 - **Memory is a wash** (warm within ±0.13 GB of cold everywhere) — the deepcopy of a 500-token
@@ -105,11 +109,13 @@ penalty on this fanless machine.
 - **Methodology notes:** (1) the run crash-recovered once — a hard Metal command-buffer OOM
   (libc++abi abort, not a catchable Python exception) killed the process 17 runs in, root cause
   the same MLX buffer-cache accumulation the eviction leg hit; fixed with per-run
-  `mx.clear_cache()` and the sweep resumed via `--resume`, so pass p2's cold/warm pair spans two
-  process lifetimes (each record carries `t_start_s` for exactly this reason). (2) The "warm"
-  condition is verified engaged, not assumed: every warm record logs the cache-hit and the
-  actual reused-token count (500/500), because the first harness draft silently ran cold — a
-  standalone-encoded prefix is not a token-prefix of the chat-templated prompt.
+  `mx.clear_cache()`. The resume initially left one cold/warm pair split across two process
+  lifetimes (both halves "ran first" thermally — caught in review); that pair was discarded and
+  rerun as a same-process pair, and records now carry a `proc_id` so `--resume` rejects split
+  pairs automatically. (2) The "warm" condition is verified engaged, not assumed: every warm
+  record logs the cache-hit and the actual reused-token count (500/500), because the first
+  harness draft silently ran cold — a standalone-encoded prefix is not a token-prefix of the
+  chat-templated prompt.
 
 Chart: `kv_cache_prefix_reuse_chart.png`.
 
