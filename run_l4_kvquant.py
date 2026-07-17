@@ -102,19 +102,44 @@ def one_run(client, target):
     ttft = None
     text = ""
     n = 0
+    usage_tokens = None
     stream = client.chat.completions.create(model=MODEL, messages=msgs, temperature=0,
-                                            max_tokens=64, stream=True)
+                                            max_tokens=64, stream=True,
+                                            stream_options={"include_usage": True})
     for chunk in stream:
+        if chunk.usage is not None:
+            usage_tokens = chunk.usage.completion_tokens
+        if not chunk.choices:
+            continue
         d = chunk.choices[0].delta.content or ""
         if d and ttft is None:
             ttft = time.perf_counter() - t0
         text += d
         n += 1
     total = time.perf_counter() - t0
+    # Token count, not chunk count (v1's known stream-chunk caveat, fixed here
+    # because chunking could differ between the fp16 and fp8 arms): prefer the
+    # server's own usage.completion_tokens; fall back to tokenizing the
+    # accumulated text.
+    gen_tokens = usage_tokens if usage_tokens else len(tok(text)["input_ids"])
     rec.update(ttft_s=round(ttft, 3) if ttft else None,
-               decode_tps=round((n - 1) / (total - ttft), 2) if ttft and total > ttft else None,
+               decode_tps=(round((gen_tokens - 1) / (total - ttft), 2)
+                           if ttft and total > ttft and gen_tokens > 1 else None),
+               gen_tokens=gen_tokens, gen_tokens_source="usage" if usage_tokens else "retokenized",
                gen_chunks=n, facts_recalled=sum(1 for _, c in FACTS if c in text))
     return rec
+
+
+OOM_MARKERS = ("out of memory", "outofmemory", "kv cache", "no available memory",
+               "insufficient memory", "cuda error", "resource exhausted")
+
+
+def classify_failure(e):
+    """OOM only when the error actually says so -- a timeout or connection drop
+    recorded as OOM would publish a false memory conclusion."""
+    msg = f"{type(e).__name__}: {str(e)[:300]}"
+    is_oom = any(m in msg.lower() for m in OOM_MARKERS)
+    return is_oom, msg
 
 
 def main():
@@ -143,16 +168,17 @@ def main():
                 print(f"  {target}: ctx {r['context_tokens']} | TTFT {r['ttft_s']}s | "
                       f"{r['decode_tps']} tok/s | recall {r['facts_recalled']}/5", flush=True)
             except Exception as e:
+                is_oom, msg = classify_failure(e)
                 r = {"stack": "vllm-l4", "kv_dtype": KV_DTYPE, "target": target, "pass": pname,
-                     "cold_discarded": cold, "oom": True,
-                     "failure": f"{type(e).__name__}: {str(e)[:160]}"}
-                print(f"  {target}: FAIL {r['failure']}", flush=True)
+                     "cold_discarded": cold, "oom": is_oom, "failed": True, "failure": msg}
+                print(f"  {target}: FAIL{' (OOM)' if is_oom else ''} {msg}", flush=True)
             raw.append(r)
             with open(RAW, "a") as f:
                 f.write(json.dumps(r) + "\n")
 
     # Aggregate THIS arm; keep the other arm's rows in OUT if present.
-    rec = [r for r in raw if not r["cold_discarded"] and not r.get("oom")]
+    rec = [r for r in raw if not r["cold_discarded"] and not r.get("failed")]
+    failed = [r for r in raw if not r["cold_discarded"] and r.get("failed")]
     n_expected = sum(1 for _, _, cold in passes if not cold)
     other = []
     if os.path.exists(OUT):
@@ -160,32 +186,45 @@ def main():
     rows = []
     for target in LENGTHS:
         s = [r for r in rec if r["target"] == target]
-        n_failed = n_expected - len(s)
+        fails = [r for r in failed if r["target"] == target]
+        n_oom = sum(1 for r in fails if r["oom"])
         if not s:
-            rows.append({"kv_dtype": KV_DTYPE, "target": target, "oom": True,
-                         "n_ok": 0, "n_expected": n_expected})
+            rows.append({"kv_dtype": KV_DTYPE, "target": target, "all_failed": True,
+                         "n_ok": 0, "n_expected": n_expected,
+                         "n_oom": n_oom, "n_other_failures": len(fails) - n_oom,
+                         "failures": [r["failure"] for r in fails]})
             continue
         def ms(k):
             v = [r[k] for r in s if r[k] is not None]
             return ({"median": round(statistics.median(v), 3), "min": min(v), "max": max(v)}
                     if v else None)
+        # Recall across ALL recorded passes (min/median/max), not just the
+        # first -- degradation across passes is exactly what this experiment
+        # exists to detect.
+        rv = sorted(r["facts_recalled"] for r in s)
         rows.append({"gpu": GPU, "model": MODEL, "kv_dtype": KV_DTYPE, "target": target,
                      "context_tokens": s[0]["context_tokens"], "n_ok": len(s),
-                     "n_expected": n_expected, "incomplete": n_failed > 0,
+                     "n_expected": n_expected, "incomplete": len(s) < n_expected,
+                     "n_oom": n_oom, "n_other_failures": len(fails) - n_oom,
                      "ttft_s": ms("ttft_s"), "decode_tps": ms("decode_tps"),
-                     "recall": f"{s[0]['facts_recalled']}/5"})
+                     "recall": {"median": statistics.median(rv), "min": rv[0], "max": rv[-1],
+                                "of": 5}})
     with open(OUT, "w") as f:
         for r in other + rows:
             f.write(json.dumps(r) + "\n")
 
     print(f"\n=== [{KV_DTYPE}] aggregated ({n_expected} recorded passes) ===", flush=True)
     for r in rows:
-        if r.get("oom"):
-            print(f"  {r['target']}: ALL FAILED ({r['n_ok']}/{r['n_expected']})", flush=True)
+        if r.get("all_failed"):
+            print(f"  {r['target']}: ALL FAILED ({r['n_oom']} OOM, "
+                  f"{r['n_other_failures']} other) -- see failures[] in {OUT}", flush=True)
             continue
         flag = "  <- INCOMPLETE" if r["incomplete"] else ""
+        rc = r["recall"]
+        rc_str = (f"{rc['median']:g}/5" if rc["min"] == rc["max"]
+                  else f"{rc['median']:g}/5 [{rc['min']},{rc['max']}]")
         print(f"  {r['target']}: TTFT {r['ttft_s']['median']}s | decode "
-              f"{r['decode_tps']['median']} tok/s | recall {r['recall']} | "
+              f"{r['decode_tps']['median']} tok/s | recall {rc_str} | "
               f"n={r['n_ok']}/{r['n_expected']}{flag}", flush=True)
     print(f"\nwrote {OUT} (this arm) + raw appended to {RAW}.\n"
           f"NOW: save this arm's server startup log (the 'GPU KV cache size' / "

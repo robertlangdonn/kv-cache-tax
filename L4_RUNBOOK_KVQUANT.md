@@ -23,18 +23,27 @@ scp -P <PORT> ~/"Work/Open-Source Contributions/kv-cache-tax/run_l4_kvquant.py" 
 
 ## 3. ARM 1 — baseline (fp16 KV)
 ```bash
-MODEL="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"
+# Model name INLINED in the tmux command below -- an unexported shell variable
+# is invisible inside the tmux session (\$MODEL would expand empty and the
+# server would fail while the readiness loop waits forever, on the clock).
 mkdir -p ~/hf-cache ~/kv-results
 docker pull vllm/vllm-openai:latest
 
 tmux new -d -s vllm "docker run --rm --gpus all --ipc=host --name vllm-l4 \
   -p 8000:8000 -v \$HOME/hf-cache:/root/.cache/huggingface \
   vllm/vllm-openai:latest \
-  --model \$MODEL --quantization awq --dtype half \
+  --model hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
+  --quantization awq --dtype half \
   --max-model-len 34000 --max-num-seqs 1 \
   --gpu-memory-utilization 0.90 --no-enable-prefix-caching --port 8000"
 
-until curl -sf http://127.0.0.1:8000/v1/models >/dev/null; do sleep 5; done
+# readiness loop with a visible heartbeat + a hard timeout so a dead server
+# can't silently burn the rental
+for i in $(seq 1 120); do
+  curl -sf http://127.0.0.1:8000/v1/models >/dev/null && break
+  sleep 5; docker logs --tail 3 vllm-l4 2>&1 | tail -1
+  [ "$i" = 120 ] && { echo "SERVER NEVER CAME UP -- check docker logs vllm-l4"; exit 1; }
+done
 docker logs vllm-l4 2>&1 | grep -iE "kv cache|gpu blocks|dtype" > ~/kv-results/startup_fp16.log
 docker logs vllm-l4 > ~/kv-results/vllm_startup_fp16_full.log
 ```
@@ -44,7 +53,8 @@ docker logs vllm-l4 > ~/kv-results/vllm_startup_fp16_full.log
 python3 -m venv ~/kv-client && source ~/kv-client/bin/activate
 pip install -U pip && pip install openai transformers
 
-export KVTAX_MODEL="$MODEL"; export KVTAX_GPU="L4-24GB"
+export KVTAX_MODEL="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4"
+export KVTAX_GPU="L4-24GB"
 export KVTAX_KV_DTYPE="fp16"
 python -u run_l4_kvquant.py 2>&1 | tee ~/kv-results/run_fp16.log
 ```
@@ -56,11 +66,16 @@ docker stop vllm-l4; sleep 5
 tmux new -d -s vllm8 "docker run --rm --gpus all --ipc=host --name vllm-l4 \
   -p 8000:8000 -v \$HOME/hf-cache:/root/.cache/huggingface \
   vllm/vllm-openai:latest \
-  --model \$MODEL --quantization awq --dtype half --kv-cache-dtype fp8 \
+  --model hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 \
+  --quantization awq --dtype half --kv-cache-dtype fp8 \
   --max-model-len 34000 --max-num-seqs 1 \
   --gpu-memory-utilization 0.90 --no-enable-prefix-caching --port 8000"
 
-until curl -sf http://127.0.0.1:8000/v1/models >/dev/null; do sleep 5; done
+for i in $(seq 1 120); do
+  curl -sf http://127.0.0.1:8000/v1/models >/dev/null && break
+  sleep 5; docker logs --tail 3 vllm-l4 2>&1 | tail -1
+  [ "$i" = 120 ] && { echo "SERVER NEVER CAME UP -- check docker logs vllm-l4"; exit 1; }
+done
 docker logs vllm-l4 2>&1 | grep -iE "kv cache|gpu blocks|dtype" > ~/kv-results/startup_fp8.log
 docker logs vllm-l4 > ~/kv-results/vllm_startup_fp8_full.log
 
