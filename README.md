@@ -71,6 +71,48 @@ stacks offer for long context.
 
 Chart: `kv_cache_eviction_chart.png`.
 
+## Prefix-reuse leg: what caching a shared 500-token prefix buys
+
+Same model, same 4 lengths. The agent case: a fixed ~500-token shared prefix (system prompt +
+tool definitions) cached once via mlx-lm's own `LRUPromptCache` — the same
+`fetch_nearest_cache()` path `mlx_lm.server` uses in production — vs a cold full prefill of the
+byte-identical prompt. Condition order alternated per pass (cold-first in 2 of 4 recorded passes
+for every length), because a fixed cold-then-warm order measurably hands the second run a thermal
+penalty on this fanless machine.
+
+| context | TTFT cold | TTFT warm | saved | saved% | prefix share of prompt |
+|---|---|---|---|---|---|
+| 2k | 21.1 s | 16.1 s | 5.0 s | **23.5%** | 24.3% |
+| 8k | 89.9 s | 84.7 s | 5.2 s | **5.7%** | 6.2% |
+| 16k | 216.4 s | 213.9 s | 2.5 s | 1.2% | 3.1% |
+| 32k | 576.7 s | 543.1 s | 33.6 s | 5.8%\* | 1.6% |
+
+- **The saving tracks the prefix's share of the prompt, then drowns in noise.** At 2k the cached
+  500 tokens are ~24% of the prompt and buy back ~24% of TTFT. By 16k they're 3% of the prompt
+  and the measured 1.2% is within run-to-run variance. A fixed-size cached prefix is a
+  short-context optimization: its absolute saving is roughly constant, so context growth dilutes
+  it — the mirror image of the eviction leg's memory plateau.
+- **\*The 32k "5.8%" is thermal noise, not signal.** The per-pass paired savings at 32k were
+  +25.9s, +15.6s, +51.6s, and +0.3s — a 51-second spread around a ~9s predicted effect, and one
+  cold pass ran 86–111s faster than the other three. Past ~16k on this fanless machine the
+  prefix-reuse effect is smaller than thermal variance and cannot be resolved; the honest claim
+  is an upper bound (the prefix's share of the prompt), not the median. Same conclusion family
+  as the v1 thermal finding.
+- **Recall is untouched: 5/5 at every length in both conditions** — `fetch_nearest_cache`'s
+  deepcopy+resume path doesn't corrupt anything it reuses.
+- **Memory is a wash** (warm within ±0.13 GB of cold everywhere) — the deepcopy of a 500-token
+  prefix is ~64 MB at this model's ~128 KiB/token; visible at 2k, irrelevant at 32k.
+- **Methodology notes:** (1) the run crash-recovered once — a hard Metal command-buffer OOM
+  (libc++abi abort, not a catchable Python exception) killed the process 17 runs in, root cause
+  the same MLX buffer-cache accumulation the eviction leg hit; fixed with per-run
+  `mx.clear_cache()` and the sweep resumed via `--resume`, so pass p2's cold/warm pair spans two
+  process lifetimes (each record carries `t_start_s` for exactly this reason). (2) The "warm"
+  condition is verified engaged, not assumed: every warm record logs the cache-hit and the
+  actual reused-token count (500/500), because the first harness draft silently ran cold — a
+  standalone-encoded prefix is not a token-prefix of the chat-templated prompt.
+
+Chart: `kv_cache_prefix_reuse_chart.png`.
+
 ## Honest caveats (read before quoting)
 
 - Two different 4-bit schemes: MLX 4-bit (M3) vs AWQ INT4 (L4). Read the two as **within-stack curves**,
@@ -96,6 +138,11 @@ python make_chart.py                          # renders kv_cache_tax_chart.png
 # Eviction leg (M3 only, reuses the same model/prompts):
 caffeinate -dimsu python run_m3_eviction.py    # full KV vs rotating window (4096, keep=4)
 python make_chart_eviction.py                  # renders kv_cache_eviction_chart.png
+
+# Prefix-reuse leg (M3 only):
+caffeinate -dimsu python -u run_m3_prefix_reuse.py   # cold vs warm (500-token cached prefix), 4 alternated passes
+#   add --resume to continue after a hard Metal OOM abort
+python make_chart_prefix_reuse.py              # renders kv_cache_prefix_reuse_chart.png
 ```
 
 ## What's here
@@ -113,6 +160,9 @@ python make_chart_eviction.py                  # renders kv_cache_eviction_chart
 | `finish_eviction_p3.py` | Recovery script — completes an interrupted pass without re-running everything (see methodology note above). |
 | `make_chart_eviction.py` | Renders the eviction-leg comparison chart. |
 | `results_m3_eviction.jsonl`, `results_m3_eviction_raw.jsonl` | Eviction leg raw + aggregated data. |
+| `run_m3_prefix_reuse.py` | Prefix-reuse leg: cold vs `LRUPromptCache`-served 500-token prefix; alternated condition order; `--resume`. |
+| `make_chart_prefix_reuse.py` | Renders the prefix-reuse chart (per-pass paired savings shown, not just medians). |
+| `results_m3_prefix_reuse.jsonl`, `results_m3_prefix_reuse_raw.jsonl` | Prefix-reuse leg aggregated + raw data (raw carries `ran_first_in_cell` + `t_start_s` per run). |
 
 ## License
 
