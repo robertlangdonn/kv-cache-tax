@@ -209,6 +209,10 @@ def warm_prefix_cache(model, tok, lru, prefix_ids):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lengths", type=int, nargs="+", default=[2000, 8000, 16000, 32000])
+    ap.add_argument("--resume", action="store_true",
+                    help="keep existing raw records and skip already-recorded "
+                         "(pass, target, condition) cells -- for continuing after "
+                         "a hard Metal OOM abort, which kills the process outright")
     args = ap.parse_args()
     L = args.lengths
 
@@ -232,7 +236,14 @@ def main():
     prefix_ids = shared_prefix_ids(tok, L)
     print(f"shared prefix: {len(prefix_ids)} tokens (token-exact across all targets)")
 
-    open(RAW, "w").close()
+    done = set()
+    if args.resume and os.path.exists(RAW):
+        for l in open(RAW):
+            r = json.loads(l)
+            done.add((r["pass"], r["target"], r["stack"].split("-")[-1]))
+        print(f"--resume: {len(done)} cells already recorded, skipping those")
+    else:
+        open(RAW, "w").close()
     t_process_start = time.perf_counter()
     for pi, (pname, order) in enumerate(passes):
         cold_warmup = pname == "warmup"
@@ -253,6 +264,9 @@ def main():
             if pi % 2 == 0 and not cold_warmup:
                 conds.reverse()
             for ci, (cond, fn) in enumerate(conds):
+                if (pname, target, cond) in done:
+                    print(f"  {target} [{cond}]: already recorded, skipped (--resume)", flush=True)
+                    continue
                 t_start = round(time.perf_counter() - t_process_start, 1)
                 if cond == "cold":
                     rec = fn(model, tok, target)
@@ -265,13 +279,19 @@ def main():
                 with open(RAW, "a") as f:
                     f.write(json.dumps(rec) + "\n")
                 if rec["oom"]:
-                    print(f"  {target} [{cond}]: OOM at {rec['context_tokens']} tok, peak {rec['peak_gb']}GB")
+                    print(f"  {target} [{cond}]: OOM at {rec['context_tokens']} tok, peak {rec['peak_gb']}GB", flush=True)
                 else:
                     extra = f" | reused {rec['prefix_reused_tokens']}tok" if cond == "warm" else ""
                     print(f"  {target} [{cond}]: ctx {rec['context_tokens']} | TTFT {rec['ttft_s']}s | "
                           f"{rec['decode_tps']} tok/s | peak {rec['peak_gb']}GB | recall {rec['facts_recalled']}/5"
-                          f"{extra}" + ("  [warmup, discarded]" if cold_warmup else ""))
-        mx.clear_cache()
+                          f"{extra}" + ("  [warmup, discarded]" if cold_warmup else ""), flush=True)
+                # Per RUN, not per pass -- the eviction leg already learned this
+                # (bd5f526): MLX's buffer cache accumulates across fresh per-run
+                # cache lists, and 17 runs in, a 32k prefill aborted the whole
+                # process with a hard Metal command-buffer OOM (libc++abi abort,
+                # NOT a catchable Python exception -- the try/except in one_run
+                # never sees it).
+                mx.clear_cache()
 
     raw = [json.loads(l) for l in open(RAW)]
     recorded = [r for r in raw if not r["cold_discarded"]]
