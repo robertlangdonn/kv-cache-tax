@@ -1,0 +1,33 @@
+
+### [fp16] warmup order=[32000, 2000, 16000, 8000] (discard)
+  32000: ctx 32104 | TTFT 10.385s | 19.36 tok/s | recall 0/5
+  2000: ctx 2440 | TTFT 0.42s | 29.01 tok/s | recall 0/5
+  16000: ctx 16264 | TTFT 3.855s | 23.49 tok/s | recall 0/5
+  8000: ctx 8392 | TTFT 1.651s | 26.4 tok/s | recall 0/5
+
+### [fp16] p1 order=[8000, 16000, 32000, 2000]
+  8000: ctx 8392 | TTFT 1.656s | 26.38 tok/s | recall 0/5
+  16000: ctx 16264 | TTFT 3.881s | 23.52 tok/s | recall 0/5
+  32000: ctx 32104 | TTFT 10.503s | 19.36 tok/s | recall 0/5
+  2000: ctx 2440 | TTFT 0.415s | 29.12 tok/s | recall 0/5
+
+### [fp16] p2 order=[32000, 2000, 16000, 8000]
+  32000: ctx 32104 | TTFT 10.481s | 19.32 tok/s | recall 0/5
+  2000: ctx 2440 | TTFT 0.423s | 29.03 tok/s | recall 0/5
+  16000: ctx 16264 | TTFT 3.893s | 23.55 tok/s | recall 0/5
+  8000: ctx 8392 | TTFT 1.669s | 26.42 tok/s | recall 0/5
+
+### [fp16] p3 order=[16000, 2000, 32000, 8000]
+  16000: ctx 16264 | TTFT 3.889s | 23.6 tok/s | recall 0/5
+  2000: ctx 2440 | TTFT 0.419s | 29.1 tok/s | recall 0/5
+  32000: ctx 32104 | TTFT 10.481s | 19.38 tok/s | recall 0/5
+  8000: ctx 8392 | TTFT 1.65s | 26.5 tok/s | recall 0/5
+
+=== [fp16] aggregated (3 recorded passes) ===
+  2000: TTFT 0.419s | decode 29.1 tok/s | recall 0/5 | n=3/3
+  8000: TTFT 1.656s | decode 26.42 tok/s | recall 0/5 | n=3/3
+  16000: TTFT 3.889s | decode 23.55 tok/s | recall 0/5 | n=3/3
+  32000: TTFT 10.481s | decode 19.36 tok/s | recall 0/5 | n=3/3
+
+wrote /home/results_l4_kvquant.jsonl (this arm) + raw appended to /home/results_l4_kvquant_raw.jsonl.
+NOW: save this arm's server startup log (the 'GPU KV cache size' / '# GPU blocks' + 'kv cache dtype' lines) -- that's the capacity half of the result.

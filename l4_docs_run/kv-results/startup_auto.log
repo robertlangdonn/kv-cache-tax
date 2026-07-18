@@ -1,0 +1,4 @@
+(EngineCore pid=494) INFO 07-18 18:20:49 [gpu_worker.py:538] Available KV cache memory: 11.47 GiB
+(EngineCore pid=494) INFO 07-18 18:20:49 [kv_cache_utils.py:2146] GPU KV cache size: 83,488 tokens
+(EngineCore pid=494) INFO 07-18 18:20:49 [kv_cache_utils.py:2147] Maximum concurrency for 32,768 tokens per request: 2.55x
+(EngineCore pid=494) INFO 07-18 18:21:50 [core.py:337] init engine (profile, create kv cache, warmup model) took 85.35 s (compilation: 20.59 s)
